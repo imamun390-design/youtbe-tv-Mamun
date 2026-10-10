@@ -26,17 +26,23 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
   flex: 1; min-width: 0;
   font: inherit; font-size: 1.4rem; color: var(--ink);
   background: var(--panel); border: 3px solid var(--line); border-radius: 12px;
-  padding: 0.7rem 1.1rem;
+  padding: 0.7rem 1.1rem; outline: none;
 }
 #q::placeholder { color: var(--muted); }
-#q:focus { outline: none; border-color: var(--focus); box-shadow: 0 0 0 5px rgba(255, 200, 0, 0.3); }
 #go, .more {
   font: inherit; font-size: 1.3rem; font-weight: 700; color: var(--ink);
   background: var(--panel); border: 3px solid var(--line); border-radius: 12px;
-  padding: 0.7rem 1.6rem; margin-left: 1rem; cursor: pointer;
+  padding: 0.7rem 1.6rem; margin-left: 1rem; cursor: pointer; outline: none;
 }
-.focusable:focus { outline: 5px solid var(--focus); outline-offset: 3px; }
-#q:focus { outline: none; }
+
+/* The yellow selector. Drawn by our own script, so it does not depend on browser focus. */
+.sel {
+  outline: 5px solid var(--focus) !important;
+  outline-offset: 4px;
+  box-shadow: 0 0 0 10px rgba(255, 200, 0, 0.28);
+}
+#q.sel { border-color: var(--focus); }
+.card.sel { -webkit-transform: scale(1.04); transform: scale(1.04); }
 
 #status { margin: 0; padding: 1.2rem 2rem; font-size: 1.3rem; color: var(--muted); }
 #status:empty { display: none; }
@@ -44,10 +50,8 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
 #results { display: flex; flex-wrap: wrap; padding: 0.6rem 1.25rem 3rem; }
 .card {
   display: block; width: calc(25% - 1.5rem); margin: 0.75rem;
-  color: var(--ink); text-decoration: none;
-  -webkit-transition: -webkit-transform 0.12s; transition: transform 0.12s;
+  color: var(--ink); text-decoration: none; outline: none;
 }
-.card:focus { -webkit-transform: scale(1.04); transform: scale(1.04); }
 .thumb {
   width: 100%; padding-top: 56.25%; border-radius: 10px;
   background: var(--panel) center / cover no-repeat;
@@ -60,11 +64,17 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
 .more { margin: 1rem auto 0; display: block; width: 100%; max-width: 20rem; }
 
 #player { display: none; position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: #000; z-index: 10; }
-#frame { width: 100%; height: 100%; border: 0; display: block; }
+#frame { position: absolute; top: 0; left: 0; border: 0; display: block; -webkit-transform-origin: 0 0; transform-origin: 0 0; }
+body.playing header, body.playing #status, body.playing #results { display: none; }
 #hint {
   position: absolute; top: 1rem; left: 1rem; padding: 0.5rem 1rem;
   font-size: 1.1rem; background: rgba(0, 0, 0, 0.75); border-radius: 8px;
   pointer-events: none; display: none;
+}
+#dbg {
+  position: fixed; right: 1rem; bottom: 1rem; z-index: 20; padding: 0.3rem 0.8rem;
+  font-size: 1rem; background: rgba(0, 0, 0, 0.8); color: var(--focus);
+  border-radius: 8px; display: none; pointer-events: none;
 }
 </style>
 </head>
@@ -82,6 +92,7 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
           allow="autoplay; fullscreen; encrypted-media" src="about:blank"></iframe>
   <div id="hint">Press Back to return to the results</div>
 </div>
+<div id="dbg"></div>
 
 <script>
 (function () {
@@ -91,18 +102,62 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
   var API_KEY = 'AIzaSyB7--4kBRZKXB3NUTM37bk6xyPzMYHkJuQ';
   var DEFAULT_QUERY = 'arafah records';   // searched when the page opens
   var PER_PAGE = 24;
+
+  // 'tv'    = open the video in YouTube TV (the page that works in Opera on your TV)
+  // 'embed' = play inside this page with YouTube's embedded player
+  var PLAYER_MODE = 'embed';
+
+  // Lighter video: the player is built this many pixels wide, then enlarged to fill the screen.
+  // YouTube picks the video quality from the player's size, so a smaller number = lighter.
+  //  426 = about 240p (lightest)   640 = about 360p   854 = about 480p   1280 = about 720p
+  var QUALITY_WIDTH = 640;
+
+  // Shows the number of the last remote key pressed (bottom right). Set false when done testing.
+  var DEBUG = true;
   // ------------------------------------------
 
   function $(id) { return document.getElementById(id); }
   var input = $('q'), goBtn = $('go'), list = $('results'), statusEl = $('status');
-  var player = $('player'), frame = $('frame'), hint = $('hint');
+  var player = $('player'), frame = $('frame'), hint = $('hint'), dbg = $('dbg');
 
   var nextToken = null, lastQuery = '', busy = false;
-  var userMoved = false, currentId = null, lastFocus = null, hintTimer = null;
+  var userMoved = false, currentId = null, cur = null, hintTimer = null, dbgTimer = null;
 
   var ta = document.createElement('textarea');
   function decode(s) { ta.innerHTML = s || ''; return ta.value; }
   function setStatus(t) { statusEl.textContent = t; }
+
+  // ---------- Selector (our own, no browser focus needed) ----------
+  function select(el) {
+    if (!el) return;
+    if (cur) cur.classList.remove('sel');
+    cur = el;
+    el.classList.add('sel');
+    var r = el.getBoundingClientRect(), h = window.innerHeight;
+    if (r.top < 90 || r.bottom > h - 40) window.scrollBy(0, r.top - (h - r.height) / 2);
+  }
+
+  function firstItem() { return list.querySelector('.card') || goBtn; }
+
+  function move(dir) {
+    var els = [].slice.call(document.querySelectorAll('.focusable'));
+    if (!cur || els.indexOf(cur) < 0) { select(firstItem()); return; }
+    var c = cur.getBoundingClientRect();
+    var cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+    var best = null, bs = 1e9;
+    for (var i = 0; i < els.length; i++) {
+      var e = els[i];
+      if (e === cur) continue;
+      var r = e.getBoundingClientRect();
+      var dx = r.left + r.width / 2 - cx, dy = r.top + r.height / 2 - cy, s;
+      if (dir === 'down') { if (dy <= 8) continue; s = dy + 2.5 * Math.abs(dx); }
+      else if (dir === 'up') { if (dy >= -8) continue; s = -dy + 2.5 * Math.abs(dx); }
+      else if (dir === 'right') { if (dx <= 8) continue; s = dx + 2.5 * Math.abs(dy); }
+      else { if (dx >= -8) continue; s = -dx + 2.5 * Math.abs(dy); }
+      if (s < bs) { bs = s; best = e; }
+    }
+    if (best) select(best);
+  }
 
   // ---------- Search ----------
   function errorText(code, d) {
@@ -118,18 +173,16 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
 
   function search(q, more) {
     if (busy) return;
-    if (API_KEY.indexOf('PASTE') === 0) {
-      setStatus('Add your YouTube API key at the top of index.html, then reload.');
-      return;
-    }
     q = (q || '').replace(/^\s+|\s+$/g, '');
     if (!q) return;
     busy = true;
     if (!more) {
       list.innerHTML = '';
+      cur = null;
       nextToken = null;
       lastQuery = q;
       setStatus('Searching for \u201c' + q + '\u201d\u2026');
+      try { history.replaceState(null, '', '?q=' + encodeURIComponent(q)); } catch (e) {}
     }
     var url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video' +
       '&videoEmbeddable=true&maxResults=' + PER_PAGE +
@@ -143,7 +196,7 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
       busy = false;
       var d = null;
       try { d = JSON.parse(x.responseText); } catch (e) {}
-      if (x.status !== 200 || !d) { setStatus(errorText(x.status, d)); goBtn.focus(); return; }
+      if (x.status !== 200 || !d) { setStatus(errorText(x.status, d)); select(goBtn); return; }
       render(d, more);
     };
     x.send();
@@ -153,7 +206,10 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
     var items = d.items || [];
     nextToken = d.nextPageToken || null;
     var old = $('more');
-    if (old) old.parentNode.removeChild(old);
+    if (old) {
+      if (cur === old) cur = null;
+      old.parentNode.removeChild(old);
+    }
 
     var firstNew = null;
     for (var i = 0; i < items.length; i++) {
@@ -164,7 +220,6 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
 
       var a = document.createElement('a');
       a.className = 'card focusable';
-      a.tabIndex = 0;
       a.href = '#/watch/' + it.id.videoId;
       a.setAttribute('data-id', it.id.videoId);
 
@@ -180,27 +235,26 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
       if (!firstNew) firstNew = a;
     }
 
-    if (!firstNew && !more) { setStatus('No videos found for \u201c' + lastQuery + '\u201d.'); goBtn.focus(); return; }
+    if (!firstNew && !more) { setStatus('No videos found for \u201c' + lastQuery + '\u201d.'); select(goBtn); return; }
     setStatus('');
 
     if (nextToken) {
       var b = document.createElement('button');
       b.id = 'more'; b.type = 'button'; b.className = 'more focusable';
       b.textContent = 'Show more';
-      b.onclick = function () { search(lastQuery, true); };
       list.appendChild(b);
     }
-    if (firstNew && (more || !userMoved)) focusEl(firstNew);
+    if (firstNew && (more || !userMoved)) select(firstNew);
   }
 
   function doSearch() {
     userMoved = false;
     input.blur();
-    goBtn.focus();
+    select(goBtn);
     search(input.value, false);
   }
 
-  // ---------- Player ----------
+  // ---------- Playing a video ----------
   function goFull(el) {
     try { var f = el.requestFullscreen || el.webkitRequestFullscreen; if (f) f.call(el); } catch (e) {}
   }
@@ -212,10 +266,34 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
     } catch (e) {}
   }
 
+  function openVideo(id) {
+    if (PLAYER_MODE === 'tv') {
+      window.location.href = 'https://www.youtube.com/tv#/watch?v=' + id;
+      return;
+    }
+    location.hash = '#/watch/' + id;
+    openPlayer(id);
+  }
+
+  var savedY = 0;
+  function sizeFrame() {
+    var W = window.innerWidth, H = window.innerHeight;
+    var fw = Math.min(QUALITY_WIDTH, W);
+    var sc = W / fw;
+    var fh = Math.round(H / sc);
+    frame.style.width = fw + 'px';
+    frame.style.height = fh + 'px';
+    frame.style.webkitTransform = 'scale(' + sc + ')';
+    frame.style.transform = 'scale(' + sc + ')';
+  }
+  window.addEventListener('resize', function () { if (currentId) sizeFrame(); });
+
   function openPlayer(id) {
     if (currentId === id) return;
-    lastFocus = document.activeElement;
     currentId = id;
+    savedY = window.pageYOffset;
+    document.body.className = 'playing';   // hide the heavy results page while playing
+    sizeFrame();
     frame.src = 'https://www.youtube.com/embed/' + id + '?autoplay=1&rel=0&playsinline=1';
     player.style.display = 'block';
     hint.style.display = 'block';
@@ -230,86 +308,76 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
     frame.src = 'about:blank';
     player.style.display = 'none';
     exitFull();
+    document.body.className = '';
+    window.scrollTo(0, savedY);
     window.focus();
-    if (lastFocus && lastFocus.focus) lastFocus.focus();
   }
 
   window.onhashchange = function () {
+    if (PLAYER_MODE !== 'embed') return;
     var m = /^#\/watch\/([A-Za-z0-9_-]{11})$/.exec(location.hash);
     if (m) openPlayer(m[1]); else closePlayer();
   };
+
+  // ---------- Actions ----------
+  function activate(el) {
+    if (!el) return;
+    if (el === input) { input.focus(); return; }
+    if (el === goBtn) { doSearch(); return; }
+    if (el.id === 'more') { search(lastQuery, true); return; }
+    var id = el.getAttribute('data-id');
+    if (id) openVideo(id);
+  }
 
   list.addEventListener('click', function (e) {
     var n = e.target;
     while (n && n !== list && !(n.className && n.className.indexOf('card') > -1)) n = n.parentNode;
     if (!n || n === list) return;
     e.preventDefault();
-    var id = n.getAttribute('data-id');
-    location.hash = '#/watch/' + id;
-    openPlayer(id);
+    select(n);
+    activate(n);
   });
+  goBtn.onclick = function () { select(goBtn); doSearch(); };
 
-  // ---------- Remote control navigation ----------
-  function focusEl(el) {
-    try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); }
-    var r = el.getBoundingClientRect(), h = window.innerHeight;
-    if (r.top < 90 || r.bottom > h - 40) window.scrollBy(0, r.top - (h - r.height) / 2);
+  // ---------- Remote control ----------
+  var BACK = { 27: 1, 4: 1, 461: 1, 10009: 1, 166: 1 };
+
+  function showKey(k) {
+    if (!DEBUG) return;
+    dbg.textContent = 'key ' + k;
+    dbg.style.display = 'block';
+    clearTimeout(dbgTimer);
+    dbgTimer = setTimeout(function () { dbg.style.display = 'none'; }, 1500);
   }
 
-  function move(dir) {
-    var els = [].slice.call(document.querySelectorAll('.focusable'));
-    var cur = document.activeElement;
-    if (els.indexOf(cur) < 0) {
-      focusEl(list.querySelector('.card') || els[0]);
-      return;
-    }
-    var c = cur.getBoundingClientRect();
-    var cx = c.left + c.width / 2, cy = c.top + c.height / 2;
-    var best = null, bs = 1e9;
-    for (var i = 0; i < els.length; i++) {
-      var e = els[i];
-      if (e === cur) continue;
-      var r = e.getBoundingClientRect();
-      var dx = r.left + r.width / 2 - cx, dy = r.top + r.height / 2 - cy, s;
-      if (dir === 'down') { if (dy <= 8) continue; s = dy + 2.5 * Math.abs(dx); }
-      else if (dir === 'up') { if (dy >= -8) continue; s = -dy + 2.5 * Math.abs(dx); }
-      else if (dir === 'right') { if (dx <= 8) continue; s = dx + 2.5 * Math.abs(dy); }
-      else { if (dx >= -8) continue; s = -dx + 2.5 * Math.abs(dy); }
-      if (s < bs) { bs = s; best = e; }
-    }
-    if (best) focusEl(best);
-  }
-
-  var BACK = { 27: 1, 8: 1, 4: 1, 461: 1, 10009: 1, 166: 1 };
-
-  document.addEventListener('keydown', function (e) {
+  window.addEventListener('keydown', function (e) {
     var k = e.keyCode;
+    showKey(k);
 
-    if (currentId) {
-      if (BACK[k]) { e.preventDefault(); history.back(); }
+    if (currentId) {                       // embedded player is open
+      if (BACK[k] || k === 8) { e.preventDefault(); history.back(); }
       return;
     }
 
-    var el = document.activeElement;
-    var inField = (el === input);
-
-    if (k === 13) {
-      if (inField) { e.preventDefault(); doSearch(); }
-      else if (el && el.className && el.className.indexOf('focusable') > -1) { e.preventDefault(); el.click(); }
-      else { e.preventDefault(); move('down'); }
-      return;
+    var typing = (document.activeElement === input);
+    if (typing) {
+      if (k === 13) { e.preventDefault(); doSearch(); return; }
+      if (k === 40 || k === 38) { e.preventDefault(); input.blur(); move(k === 40 ? 'down' : 'up'); return; }
+      if (BACK[k]) { e.preventDefault(); input.blur(); return; }
+      return;                              // let the person type
     }
 
+    if (k === 13 || k === 23) {
+      e.preventDefault();
+      if (!cur) select(firstItem()); else activate(cur);
+      return;
+    }
     if (k >= 37 && k <= 40) {
-      if (inField && (k === 37 || (k === 39 && input.selectionStart !== input.value.length))) return;
-      if (inField && k === 37) return;
       e.preventDefault();
       userMoved = true;
       move(k === 37 ? 'left' : k === 38 ? 'up' : k === 39 ? 'right' : 'down');
     }
   }, true);
-
-  goBtn.onclick = doSearch;
 
   // ---------- Start ----------
   var m = /[?&]q=([^&]*)/.exec(location.search);
@@ -317,7 +385,7 @@ header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
   if (m) { try { q0 = decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) {} }
   input.value = q0;
   window.focus();
-  goBtn.focus();       // gives the page keyboard focus straight away
+  select(goBtn);        // the selector is visible right away
   search(q0, false);
   window.onhashchange();
 })();
