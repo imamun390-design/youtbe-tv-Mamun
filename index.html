@@ -1,0 +1,370 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<title>TV Tube</title>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #121722;
+  --panel: #1c2335;
+  --line: #2e3957;
+  --ink: #eef1f7;
+  --muted: #9ba6bf;
+  --focus: #ffc800;
+}
+* { box-sizing: border-box; }
+html { font-size: 1.5vw; }
+@media (max-width: 800px) { html { font-size: 15px; } }
+html, body { margin: 0; background: var(--bg); color: var(--ink); }
+body { font-family: 'Atkinson Hyperlegible', Arial, Helvetica, sans-serif; min-height: 100vh; }
+
+header { display: flex; align-items: center; padding: 1.4rem 2rem 0.6rem; }
+#q {
+  flex: 1; min-width: 0;
+  font: inherit; font-size: 1.4rem; color: var(--ink);
+  background: var(--panel); border: 3px solid var(--line); border-radius: 12px;
+  padding: 0.7rem 1.1rem; outline: none;
+}
+#q::placeholder { color: var(--muted); }
+#go, .more {
+  font: inherit; font-size: 1.3rem; font-weight: 700; color: var(--ink);
+  background: var(--panel); border: 3px solid var(--line); border-radius: 12px;
+  padding: 0.7rem 1.6rem; margin-left: 1rem; cursor: pointer; outline: none;
+}
+
+/* The yellow selector. Drawn by our own script, so it does not depend on browser focus. */
+.sel {
+  outline: 5px solid var(--focus) !important;
+  outline-offset: 4px;
+  box-shadow: 0 0 0 10px rgba(255, 200, 0, 0.28);
+}
+#q.sel { border-color: var(--focus); }
+.card.sel { -webkit-transform: scale(1.04); transform: scale(1.04); }
+
+#status { margin: 0; padding: 1.2rem 2rem; font-size: 1.3rem; color: var(--muted); }
+#status:empty { display: none; }
+
+#results { display: flex; flex-wrap: wrap; padding: 0.6rem 1.25rem 3rem; }
+.card {
+  display: block; width: calc(25% - 1.5rem); margin: 0.75rem;
+  color: var(--ink); text-decoration: none; outline: none;
+}
+.thumb {
+  width: 100%; padding-top: 56.25%; border-radius: 10px;
+  background: var(--panel) center / cover no-repeat;
+}
+.title {
+  margin-top: 0.55rem; font-size: 1.1rem; font-weight: 700; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.chan { margin-top: 0.2rem; font-size: 0.95rem; color: var(--muted); }
+.more { margin: 1rem auto 0; display: block; width: 100%; max-width: 20rem; }
+
+#player { display: none; position: fixed; top: 0; right: 0; bottom: 0; left: 0; background: #000; z-index: 10; }
+#frame { width: 100%; height: 100%; border: 0; display: block; }
+#hint {
+  position: absolute; top: 1rem; left: 1rem; padding: 0.5rem 1rem;
+  font-size: 1.1rem; background: rgba(0, 0, 0, 0.75); border-radius: 8px;
+  pointer-events: none; display: none;
+}
+#dbg {
+  position: fixed; right: 1rem; bottom: 1rem; z-index: 20; padding: 0.3rem 0.8rem;
+  font-size: 1rem; background: rgba(0, 0, 0, 0.8); color: var(--focus);
+  border-radius: 8px; display: none; pointer-events: none;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <input id="q" class="focusable" type="text" placeholder="Search YouTube" autocomplete="off">
+  <button id="go" class="focusable" type="button">Search</button>
+</header>
+<p id="status" role="status"></p>
+<main id="results"></main>
+
+<div id="player">
+  <iframe id="frame" tabindex="-1" allowfullscreen
+          allow="autoplay; fullscreen; encrypted-media" src="about:blank"></iframe>
+  <div id="hint">Press Back to return to the results</div>
+</div>
+<div id="dbg"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ---------- Settings: edit these ----------
+  var API_KEY = 'AIzaSyB7--4kBRZKXB3NUTM37bk6xyPzMYHkJuQ';
+  var DEFAULT_QUERY = 'arafah records';   // searched when the page opens
+  var PER_PAGE = 24;
+
+  // 'tv'    = open the video in YouTube TV (the page that works in Opera on your TV)
+  // 'embed' = play inside this page with YouTube's embedded player
+  var PLAYER_MODE = 'tv';
+
+  // Shows the number of the last remote key pressed (bottom right). Set false when done testing.
+  var DEBUG = true;
+  // ------------------------------------------
+
+  function $(id) { return document.getElementById(id); }
+  var input = $('q'), goBtn = $('go'), list = $('results'), statusEl = $('status');
+  var player = $('player'), frame = $('frame'), hint = $('hint'), dbg = $('dbg');
+
+  var nextToken = null, lastQuery = '', busy = false;
+  var userMoved = false, currentId = null, cur = null, hintTimer = null, dbgTimer = null;
+
+  var ta = document.createElement('textarea');
+  function decode(s) { ta.innerHTML = s || ''; return ta.value; }
+  function setStatus(t) { statusEl.textContent = t; }
+
+  // ---------- Selector (our own, no browser focus needed) ----------
+  function select(el) {
+    if (!el) return;
+    if (cur) cur.classList.remove('sel');
+    cur = el;
+    el.classList.add('sel');
+    var r = el.getBoundingClientRect(), h = window.innerHeight;
+    if (r.top < 90 || r.bottom > h - 40) window.scrollBy(0, r.top - (h - r.height) / 2);
+  }
+
+  function firstItem() { return list.querySelector('.card') || goBtn; }
+
+  function move(dir) {
+    var els = [].slice.call(document.querySelectorAll('.focusable'));
+    if (!cur || els.indexOf(cur) < 0) { select(firstItem()); return; }
+    var c = cur.getBoundingClientRect();
+    var cx = c.left + c.width / 2, cy = c.top + c.height / 2;
+    var best = null, bs = 1e9;
+    for (var i = 0; i < els.length; i++) {
+      var e = els[i];
+      if (e === cur) continue;
+      var r = e.getBoundingClientRect();
+      var dx = r.left + r.width / 2 - cx, dy = r.top + r.height / 2 - cy, s;
+      if (dir === 'down') { if (dy <= 8) continue; s = dy + 2.5 * Math.abs(dx); }
+      else if (dir === 'up') { if (dy >= -8) continue; s = -dy + 2.5 * Math.abs(dx); }
+      else if (dir === 'right') { if (dx <= 8) continue; s = dx + 2.5 * Math.abs(dy); }
+      else { if (dx >= -8) continue; s = -dx + 2.5 * Math.abs(dy); }
+      if (s < bs) { bs = s; best = e; }
+    }
+    if (best) select(best);
+  }
+
+  // ---------- Search ----------
+  function errorText(code, d) {
+    var reason = '';
+    try { reason = d.error.errors[0].reason; } catch (e) {}
+    if (reason === 'quotaExceeded') return 'Today\u2019s search limit is used up. Try again tomorrow.';
+    if (reason === 'keyInvalid') return 'The API key is not valid. Check it at the top of index.html.';
+    if (reason === 'ipRefererBlocked' || reason === 'forbidden')
+      return 'This API key is not allowed on this website. Check the website restriction in Google Cloud.';
+    if (code === 0) return 'No internet connection, or the request was blocked.';
+    return 'Search failed (code ' + code + ').';
+  }
+
+  function search(q, more) {
+    if (busy) return;
+    q = (q || '').replace(/^\s+|\s+$/g, '');
+    if (!q) return;
+    busy = true;
+    if (!more) {
+      list.innerHTML = '';
+      cur = null;
+      nextToken = null;
+      lastQuery = q;
+      setStatus('Searching for \u201c' + q + '\u201d\u2026');
+      try { history.replaceState(null, '', '?q=' + encodeURIComponent(q)); } catch (e) {}
+    }
+    var url = 'https://www.googleapis.com/youtube/v3/search?part=snippet&type=video' +
+      '&videoEmbeddable=true&maxResults=' + PER_PAGE +
+      '&q=' + encodeURIComponent(q) + '&key=' + encodeURIComponent(API_KEY);
+    if (more && nextToken) url += '&pageToken=' + encodeURIComponent(nextToken);
+
+    var x = new XMLHttpRequest();
+    x.open('GET', url);
+    x.onreadystatechange = function () {
+      if (x.readyState !== 4) return;
+      busy = false;
+      var d = null;
+      try { d = JSON.parse(x.responseText); } catch (e) {}
+      if (x.status !== 200 || !d) { setStatus(errorText(x.status, d)); select(goBtn); return; }
+      render(d, more);
+    };
+    x.send();
+  }
+
+  function render(d, more) {
+    var items = d.items || [];
+    nextToken = d.nextPageToken || null;
+    var old = $('more');
+    if (old) {
+      if (cur === old) cur = null;
+      old.parentNode.removeChild(old);
+    }
+
+    var firstNew = null;
+    for (var i = 0; i < items.length; i++) {
+      var it = items[i];
+      if (!it.id || !it.id.videoId) continue;
+      var sn = it.snippet || {};
+      var th = sn.thumbnails && (sn.thumbnails.medium || sn.thumbnails['default']);
+
+      var a = document.createElement('a');
+      a.className = 'card focusable';
+      a.href = '#/watch/' + it.id.videoId;
+      a.setAttribute('data-id', it.id.videoId);
+
+      var t = document.createElement('div'); t.className = 'thumb';
+      if (th && th.url) t.style.backgroundImage = 'url(' + th.url + ')';
+      var ti = document.createElement('div'); ti.className = 'title';
+      ti.textContent = decode(sn.title);
+      var ch = document.createElement('div'); ch.className = 'chan';
+      ch.textContent = decode(sn.channelTitle);
+
+      a.appendChild(t); a.appendChild(ti); a.appendChild(ch);
+      list.appendChild(a);
+      if (!firstNew) firstNew = a;
+    }
+
+    if (!firstNew && !more) { setStatus('No videos found for \u201c' + lastQuery + '\u201d.'); select(goBtn); return; }
+    setStatus('');
+
+    if (nextToken) {
+      var b = document.createElement('button');
+      b.id = 'more'; b.type = 'button'; b.className = 'more focusable';
+      b.textContent = 'Show more';
+      list.appendChild(b);
+    }
+    if (firstNew && (more || !userMoved)) select(firstNew);
+  }
+
+  function doSearch() {
+    userMoved = false;
+    input.blur();
+    select(goBtn);
+    search(input.value, false);
+  }
+
+  // ---------- Playing a video ----------
+  function goFull(el) {
+    try { var f = el.requestFullscreen || el.webkitRequestFullscreen; if (f) f.call(el); } catch (e) {}
+  }
+  function exitFull() {
+    try {
+      if (document.fullscreenElement || document.webkitFullscreenElement) {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      }
+    } catch (e) {}
+  }
+
+  function openVideo(id) {
+    if (PLAYER_MODE === 'tv') {
+      window.location.href = 'https://www.youtube.com/tv#/watch?v=' + id;
+      return;
+    }
+    location.hash = '#/watch/' + id;
+    openPlayer(id);
+  }
+
+  function openPlayer(id) {
+    if (currentId === id) return;
+    currentId = id;
+    frame.src = 'https://www.youtube.com/embed/' + id + '?autoplay=1&rel=0&playsinline=1';
+    player.style.display = 'block';
+    hint.style.display = 'block';
+    clearTimeout(hintTimer);
+    hintTimer = setTimeout(function () { hint.style.display = 'none'; }, 3500);
+    goFull(player);
+  }
+
+  function closePlayer() {
+    if (!currentId) return;
+    currentId = null;
+    frame.src = 'about:blank';
+    player.style.display = 'none';
+    exitFull();
+    window.focus();
+  }
+
+  window.onhashchange = function () {
+    if (PLAYER_MODE !== 'embed') return;
+    var m = /^#\/watch\/([A-Za-z0-9_-]{11})$/.exec(location.hash);
+    if (m) openPlayer(m[1]); else closePlayer();
+  };
+
+  // ---------- Actions ----------
+  function activate(el) {
+    if (!el) return;
+    if (el === input) { input.focus(); return; }
+    if (el === goBtn) { doSearch(); return; }
+    if (el.id === 'more') { search(lastQuery, true); return; }
+    var id = el.getAttribute('data-id');
+    if (id) openVideo(id);
+  }
+
+  list.addEventListener('click', function (e) {
+    var n = e.target;
+    while (n && n !== list && !(n.className && n.className.indexOf('card') > -1)) n = n.parentNode;
+    if (!n || n === list) return;
+    e.preventDefault();
+    select(n);
+    activate(n);
+  });
+  goBtn.onclick = function () { select(goBtn); doSearch(); };
+
+  // ---------- Remote control ----------
+  var BACK = { 27: 1, 4: 1, 461: 1, 10009: 1, 166: 1 };
+
+  function showKey(k) {
+    if (!DEBUG) return;
+    dbg.textContent = 'key ' + k;
+    dbg.style.display = 'block';
+    clearTimeout(dbgTimer);
+    dbgTimer = setTimeout(function () { dbg.style.display = 'none'; }, 1500);
+  }
+
+  window.addEventListener('keydown', function (e) {
+    var k = e.keyCode;
+    showKey(k);
+
+    if (currentId) {                       // embedded player is open
+      if (BACK[k] || k === 8) { e.preventDefault(); history.back(); }
+      return;
+    }
+
+    var typing = (document.activeElement === input);
+    if (typing) {
+      if (k === 13) { e.preventDefault(); doSearch(); return; }
+      if (k === 40 || k === 38) { e.preventDefault(); input.blur(); move(k === 40 ? 'down' : 'up'); return; }
+      if (BACK[k]) { e.preventDefault(); input.blur(); return; }
+      return;                              // let the person type
+    }
+
+    if (k === 13 || k === 23) {
+      e.preventDefault();
+      if (!cur) select(firstItem()); else activate(cur);
+      return;
+    }
+    if (k >= 37 && k <= 40) {
+      e.preventDefault();
+      userMoved = true;
+      move(k === 37 ? 'left' : k === 38 ? 'up' : k === 39 ? 'right' : 'down');
+    }
+  }, true);
+
+  // ---------- Start ----------
+  var m = /[?&]q=([^&]*)/.exec(location.search);
+  var q0 = DEFAULT_QUERY;
+  if (m) { try { q0 = decodeURIComponent(m[1].replace(/\+/g, ' ')); } catch (e) {} }
+  input.value = q0;
+  window.focus();
+  select(goBtn);        // the selector is visible right away
+  search(q0, false);
+  window.onhashchange();
+})();
+</script>
+</body>
+</html>
